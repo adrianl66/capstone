@@ -1,0 +1,225 @@
+# Data Science Capstone Project Milestone Report
+Adrian Lim 18 March 2016 
+
+# Synopsis
+This Report details the current progress of the capstone project which is to design and implement a shiny application for text prediction using the HC Corpora Dataset.
+In particular we will show the data cleansing steps, exploratory data analysis and preliminary findings that we have found so far and detail out the planning for the rest of the project 
+
+# Data Processing
+## 1)Prerequisite Libraries
+Load the required R libraries.  
+```{r message=FALSE,warning=FALSE,results="hide"}
+library(tm)
+library(RWeka)
+library(tau)
+library(wordcloud)
+library(SnowballC)
+library(slam)
+library(stringi)
+library(R.utils)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+```
+
+## 2)Unzip and read the data file
+The data is downloaded from [Capstone Dataset](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip).  
+The data is from the HC Corpora corpus which is further described in [HC Corpora README](http://www.corpora.heliohost.org/aboutcorpus.html)
+The zipped file is downloaded into the current working directory for further processing.  
+There are 3 files in the English directory of the data namely blogs,news and twitter data which we will utilise for this project.
+ 
+```{r cache=TRUE}
+#file <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+#destination <- "./download/Coursera-Swiftkey.zip"
+#download.file(file,destination)
+#unzip("./download/Coursera-SwiftKey.zip")
+setwd("C:/Users/adrian/Desktop/Git Repository/COursera/capstone")
+
+blogs <- readLines("./download/en_US.blogs.txt",encoding='UTF-8',skipNul=TRUE)
+#iconv(blogs, "UTF-8", "ascii", sub = " ")
+news <- readLines("./download/en_US.news.txt",encoding='UTF-8',skipNul=TRUE)
+#iconv(news, "UTF-8", "ascii", sub = " ")
+twitter <- readLines("./download/en_US.twitter.txt",encoding='UTF-8',skipNul=TRUE)
+#iconv(twitter, "UTF-8", "ascii", sub = " ")
+```
+## 3)Basic File Information
+We now find basic file information such as the file size, number of lines in the file, number of words and number of maximum/minimum characters per line in each of the 3 files. 
+
+```{r cache=FALSE}
+blogsFileSize <- file.info("./download/en_US.blogs.txt")$size/(1024*1024)
+newsFileSize <- file.info("./download/en_US.news.txt")$size/(1024*1024)
+twitterFileSize <- file.info("./download/en_US.twitter.txt")$size/(1024*1024)
+
+blogsNumWords <- sum(stri_count_words(blogs))
+newsNumWords <- sum(stri_count_words(news))
+twitterNumWords <- sum(stri_count_words(twitter))
+
+blogsMaxCharsLine <- max(nchar(blogs))
+newsMaxCharsLine <- max(nchar(news))
+twitterMaxCharsLine <- max(nchar(twitter))
+
+blogsMinCharsLine <- min(nchar(blogs))
+newsMinCharsLine <- min(nchar(news))
+twitterMinCharsLine <- min(nchar(twitter))
+
+summary <- data.frame(filename = c("blogs","news","twitter"),
+                      filesizeMB = c(blogsFileSize, newsFileSize, twitterFileSize),
+                      numLines = c(length(blogs),length(news),length(twitter)),
+                      numWords = c(blogsNumWords,newsNumWords,twitterNumWords),
+                      maxCharsLine = c(blogsMaxCharsLine,newsMaxCharsLine,twitterMaxCharsLine),
+                      minCharsLine = c(blogsMinCharsLine,newsMinCharsLine,twitterMinCharsLine))
+print(kable(summary))
+```
+## 4)Sampling Data
+As the files are large, we sample 3% of the lines from each file and combine into our test data set. This is to enable faster processing.
+
+```{r}
+set.seed(80) #enable reproducibility
+Tblogs <- blogs[sample(1:length(blogs),0.03*length(blogs))]
+Tnews <- news[sample(1:length(news),0.03*length(news))]
+Ttwitter <- twitter[sample(1:length(twitter),0.03*length(twitter))]
+Testfile <- c(Tblogs,Tnews,Ttwitter)
+writeLines(Testfile,"./data/TestFile.txt")
+```
+
+The results in a test file of `r length(Testfile)` lines with `r sum(stri_count_words(Testfile))` words with the longest line length being `r max(nchar(Testfile))` characters long and the shortest line length being `r min(nchar(Testfile))` characters long. 
+
+# Cleaning the Test File
+We now clean the testfile by:
+
+- standardising on lower case characters
+- removing punctuation
+- removing numbers
+- removing whitespace
+- removing profanity. This is accomplished by removing the words found in a list downloaded from [Profane Word List](https://github.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/blob/master/en)
+- removing common english stopwords.
+
+This is accomplished by using the [tm library](https://cran.r-project.org/web/packages/tm/index.html)
+
+```{r}
+Cleanfile <- Corpus(DirSource("./data"))
+#Cleanfile <- Corpus(VectorSource(Cleanfile))
+#corpus <- Corpus(VectorSource(smpl))
+
+Cleanfile <- tm_map(Cleanfile,removePunctuation)
+Cleanfile <- tm_map(Cleanfile,removeNumbers)
+Cleanfile <- tm_map(Cleanfile,stripWhitespace)
+Cleanfile <- tm_map(Cleanfile,content_transformer(tolower))
+
+Cleanfile <- tm_map(Cleanfile,stemDocument)
+Cleanfile <- tm_map(Cleanfile,removeWords, stopwords("english"))
+#Read in list of profanity words that we want to remove
+profanity <- readLines("./download/profanity.txt",encoding='UTF-8',skipNul=TRUE)
+Cleanfile <- tm_map(Cleanfile,removeWords, profanity)
+#Cleanfile <- removeSparseTerms(Cleanfile , 0.9995)
+Cleanfile <- tm_map(Cleanfile,PlainTextDocument)
+#save(Cleanfile,file="./data/predict/Corpus.RData")
+```
+#Tokenisation
+We now use the [RWeka library](https://cran.r-project.org/web/packages/RWeka/index.html) to tokenise the test file into 1,2 and 3 word clusters called N-Grams. By counting the frequency of those word combinations, this can then become a basis of our prediction algorithim.
+
+##Unigram wordcount
+First we tokenise single words (Unigrams) and visualise the words with the highest frequency in the testfile.
+
+```{r}
+Unigram <- function(x) NGramTokenizer(x,Weka_control(min=1,max=1))
+UniDoc <- DocumentTermMatrix(Cleanfile,control=list(tokenize = Unigram))
+UniDoc.matrix <- as.matrix(UniDoc)
+frequency <- colSums(UniDoc.matrix)
+frequency <- sort(frequency,decreasing=TRUE)
+UniGramFrequency <- data.frame(word=names(frequency),freq=frequency)   
+colspectrum <- brewer.pal(6, "Dark2")   
+wordcloud(names(frequency), frequency, max.words=50, rot.per=0.3, colors=colspectrum) 
+```
+
+## Bigram Frequency
+Here we tokenise word pairs (Bigrams) and create a chart of the highest frequency Bigrams.
+
+```{r}
+Bigram <- function(x) NGramTokenizer(x,Weka_control(min=2,max=2))
+BiDoc <- DocumentTermMatrix(Cleanfile,control=list(tokenize = Bigram))
+BiDoc.matrix <- as.matrix(BiDoc)
+frequency2 <- colSums(BiDoc.matrix)
+frequency2 <- sort(frequency2,decreasing=TRUE)
+frequency <- head(frequency2,8)
+BiGramFrequency <- data.frame(word=names(frequency),freq=frequency)
+BiGramFrequency %>%
+  #filter(freq > 750) %>%
+  ggplot(aes(word,freq)) +
+  geom_bar(stat="identity",colour="red",fill="blue") +
+  ggtitle("Bigrams with the highest frequencies") +
+  xlab("Bigrams") + ylab("Frequency") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Trigram Frequency
+Here we tokenise word triplets (Trigrams) and create a chart of the highest frequency Trigrams.
+
+```{r}
+Trigram <- function(x) NGramTokenizer(x,Weka_control(min=3,max=3))
+TriDoc <- DocumentTermMatrix(Cleanfile,control=list(tokenize = Trigram))
+TriDoc.matrix <- as.matrix(TriDoc)
+frequency3 <- colSums(TriDoc.matrix)
+frequency3 <- sort(frequency3,decreasing=TRUE)
+frequency <- head(frequency3,8)
+TriGramFrequency <- data.frame(word=names(frequency),freq=frequency)
+TriGramFrequency %>%
+  #filter(freq) %>%
+  ggplot(aes(word,freq)) +
+  geom_bar(stat="identity",colour="red",fill="blue") +
+  ggtitle("Trigrams with the highest frequencies") +
+  xlab("Trigrams") + ylab("Frequency") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+
+```
+
+## Quadrigram Frequency
+Here we tokenise word quadruplets (Quadrigrams) and create a chart of the highest frequency Quadrigrams.
+
+```{r}
+Quadrigram <- function(x) NGramTokenizer(x,Weka_control(min=4,max=4))
+QuadriDoc <- DocumentTermMatrix(Cleanfile,control=list(tokenize = Quadrigram))
+QuadriDoc.matrix <- as.matrix(QuadriDoc)
+frequency4 <- colSums(QuadriDoc.matrix)
+frequency4 <- sort(frequency4,decreasing=TRUE)
+frequency <- head(frequency4,8)
+QuadriGramFrequency <- data.frame(word=names(frequency),freq=frequency)
+QuadriGramFrequency %>%
+  #filter(freq) %>%
+  ggplot(aes(word,freq)) +
+  geom_bar(stat="identity",colour="red",fill="blue") +
+  ggtitle("Quadrigrams with the highest frequencies") +
+  xlab("Quadrigrams") + ylab("Frequency") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+It is clear that some more cleaning needs to be performed to account for multiple repeats of the same word for example "omg omg omg omg" above.
+
+# Simple Prediction Algorithm
+## Trigram Table 
+use last 2 words in the phrase, match against first 2 words in frequency sorted trigram table and predict using the 3rd word in the trigram table
+
+```{r}
+f <- function(queryHistoryTab, query, n = 2) {
+  require(tau)
+  trigrams <- sort(textcnt(rep(tolower(names(queryHistoryTab)), queryHistoryTab), method = "string", n = length(scan(text = query, what = "character", quiet = TRUE)) + 1))
+  query <- tolower(query)
+  idx <- which(substr(names(trigrams), 0, nchar(query)) == query)
+  res <- head(names(sort(trigrams[idx], decreasing = TRUE)), n)
+  res <- substr(res, nchar(query) + 2, nchar(res))
+  return(res)
+}
+print(f(frequency3,"case of"))
+
+```
+## Quadrigram Table 
+use last 3 words in the phrase, match against first 3 words in frequency sorted Quadrigram table and predict using the 4th word in the Quadrigram table
+
+```{r}
+print(f(frequency4,"a case of"))
+
+```
+
+# Summary of Plan Moving Forward
+The goal of the project is to build a shiny app that accepts text entry and predicts the likely next word to be entered by the user. The shiny app will give a list of several predicted words that the user can choose. This can be accomplished by building a prediction model that uses the frequency of the N grams (1,2,3 and even 4 N grams) as a predictor for the likely word.

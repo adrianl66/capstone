@@ -1,0 +1,10 @@
+name: capstone
+account: adrianl66
+server: shinyapps.io
+appId: 97150
+bundleId: 431471
+url: https://adrianl66.shinyapps.io/capstone/
+when: 1461480035.09354
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: first working version/models.R|first working version/ngram.RData|first working version/profanity.txt|first working version/server.R|first working version/ui.R
